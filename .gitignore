@@ -1,0 +1,6 @@
+.vscode/
+.pio/
+secrets.h
+*.cpp.o
+
+*.pdf
