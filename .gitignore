@@ -1,6 +1,6 @@
 .vscode/
 .pio/
 secrets.h
-*.cpp.o
+*.ino.cpp
 
 *.pdf

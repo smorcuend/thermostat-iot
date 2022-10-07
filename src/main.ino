@@ -4,7 +4,9 @@
 #include <TFT_eSPI.h>
 
 #include <TimeOut.h>
-#include <WiFi.h> 
+#include <NTPClient.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
 
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
@@ -14,10 +16,20 @@
 #include "settings.h"
 #include "secrets.h"
 
-#define I2C_SDA 26
-#define I2C_SCL 25
+// #define _debug
+
+#define I2C_SDA 25
+#define I2C_SCL 32
+
+#define RELAY_PIN 33 
 
 #define SEALEVELPRESSURE_HPA (1013.25)
+
+WiFiUDP ntpUDP;
+// You can specify the time server pool and the offset, (in seconds)
+// additionaly you can specify the update interval (in milliseconds).
+int GTMOffset = 2;
+NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", GTMOffset*60*60, 60000);
 
 TwoWire I2CBME = TwoWire(0);
 Adafruit_BME280 bme;
@@ -26,14 +38,15 @@ TFT_eSPI tft = TFT_eSPI();
 
 uint16_t t_x = 0, t_y = 0; // To store the touch coordinates
 uint8_t Thermostat_mode = BOOT;
-uint8_t iRoom_temperature = 21;
-uint8_t iSet_temperature = 24;
+float iRoom_temperature = 0.0;
+float iSet_temperature = 30.0;
 
 bool Touch_pressed = false;
 
 Interval interval0;
 void intervalBlackOut();
 void readBME280();
+void updateTime();
 
 void initWiFi() {
   WiFi.mode(WIFI_STA);
@@ -44,29 +57,31 @@ void initWiFi() {
     Serial.print('.');
     delay(1000);
   }
+  #ifdef _debug
   Serial.println("WiFi connected");
   Serial.println("IP address: ");
   IPAddress ip = WiFi.localIP();
   Serial.println(ip);
+  #endif
 }
 
 // Define display helpers
 void displayInit(int width, int height) {
-#ifdef ESP32
   tft.init();
   tft.setRotation(1); //Landscape
 
+  #ifdef _debug
   Serial.print("tftx=");
   Serial.print(tft.width());
   Serial.print(" tfty=");
   Serial.println(tft.height());
+  #endif
 
   // Calibrate the touch screen and retrieve the scaling factors
   touch_calibrate();
 
   // Clear the screen
   tft.fillScreen(TFT_BLACK);
-#endif
 }
 
 void initTouchScreen() {
@@ -125,7 +140,7 @@ void touch_calibrate() {
 void update_Room_temp() {
   int16_t x1, y1;
   uint16_t w, h;
-  String curValue = String(iRoom_temperature);
+  String curValue = String(static_cast<int>(iRoom_temperature));
   int str_len = curValue.length() + 1;
   char char_array[str_len];
   curValue.toCharArray(char_array, str_len);
@@ -133,7 +148,7 @@ void update_Room_temp() {
   tft.setTextColor(ILI9341_WHITE, ILI9341_ULTRA_DARKGREY);
   tft.setFreeFont(LABEL2_FONT);
   // tft.getTextBounds(char_array, 40, 220, &x1, &y1, &w, &h);
-  tft.setCursor(41 - w, 220);
+  tft.setCursor(38 - w, 220);
   tft.print(char_array);
 }
 
@@ -146,7 +161,7 @@ void update_Room_temp() {
 void update_SET_temp() {
   int16_t x1, y1;
   uint16_t w, h;
-  String curValue = String(iSet_temperature);
+  String curValue = String(static_cast<int>(iSet_temperature));
   int str_len = curValue.length() + 1;
   char char_array[str_len];
   curValue.toCharArray(char_array, str_len);
@@ -165,15 +180,15 @@ void update_SET_temp() {
  * @param[in] None
  * @return    None
  *********************************************************************/
-void draw_circles() {
+void draw_circles(int room_temp, int set_temp) {
 
   //draw big circle 
   unsigned char i;
-  if (iRoom_temperature < iSet_temperature) {
+  if (room_temp < set_temp) {
     // heating - red
     for (i = 0; i < 10; i++) tft.drawCircle(120, 120, 80 + i, ILI9341_RED);
   }
-  else if (iRoom_temperature > iSet_temperature) {
+  else if (room_temp > set_temp) {
     // cooling - blue
     for (i = 0; i < 10; i++) tft.drawCircle(120, 120, 80 + i, ILI9341_BLUE);
   }
@@ -188,7 +203,7 @@ void draw_circles() {
   //draw °C in big circle
   tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
   tft.setFreeFont(LABEL2_FONT);
-  tft.setCursor(130, 100);
+  tft.setCursor(135, 100);
   tft.print("o");
   tft.setFreeFont(LABEL3_FONT);
   tft.setCursor(140, 130);
@@ -199,8 +214,9 @@ void draw_circles() {
   tft.setFreeFont(LABEL1_FONT);
   tft.setCursor(75, 220);
   tft.print("C");
-  tft.drawCircle(69, 204, 2, ILI9341_WHITE);
-  tft.drawCircle(69, 204, 3, ILI9341_WHITE);
+  // Draw º char
+  tft.drawCircle(74, 204, 2, ILI9341_WHITE);
+  tft.drawCircle(74, 204, 3, ILI9341_WHITE);
   tft.setFreeFont(LABEL1_FONT);
   tft.setCursor(35, 190);
   tft.print("Room");
@@ -215,22 +231,24 @@ void draw_circles() {
  * @return    None
  *********************************************************************/
 void update_circle_color() {
+  int iRoom_int = iRoom_temperature / 1.0;
+  int iSet_int = iSet_temperature / 1.0;
   // HEATING 
-  if ((iRoom_temperature < iSet_temperature) && (Thermostat_mode != HEATING)) {
+  if ((iRoom_int < iSet_int) && (Thermostat_mode != HEATING)) {
     Thermostat_mode = HEATING;
-    draw_circles();
+    draw_circles(iRoom_int, iSet_int);
   }
 
   // COOLING 
-  if ((iRoom_temperature > iSet_temperature) && (Thermostat_mode != COOLING)) {
+  if ((iRoom_int > iSet_int) && (Thermostat_mode != COOLING)) {
     Thermostat_mode = COOLING;
-    draw_circles();
+    draw_circles(iRoom_int, iSet_int);
   }
 
   // Temperature ok 
-  if ((iRoom_temperature == iSet_temperature) && (Thermostat_mode != TEMP_OK)) {
+  if ((iRoom_int == iSet_int) && (Thermostat_mode != TEMP_OK)) {
     Thermostat_mode = TEMP_OK;
-    draw_circles();
+    draw_circles(iRoom_int, iSet_int);
   }
 }
 
@@ -309,6 +327,7 @@ void touchscreen() {
     DetectButtons(x, y);
 
     // Testing purpose
+    #ifdef _debug
     tft.fillRect(0, 0, 80, 50, TFT_BLACK);
     tft.setFreeFont(LABEL0_FONT);
     tft.setTextSize(1);
@@ -316,6 +335,7 @@ void touchscreen() {
     tft.printf("x: %i ", x);
     tft.setCursor(5, 35, 2);
     tft.printf("y: %i ", y);
+    #endif
   }
 }
 
@@ -326,8 +346,16 @@ void touchscreen() {
  *********************************************************************/
 void intervalBlackOut() {
   Touch_pressed = false;
-  Serial.println("Interval blackout have been trigged");
   digitalWrite(TFT_LED, HIGH);
+}
+
+void updateTime() {
+  String time = timeClient.getFormattedTime();
+  tft.fillRect(0, 0, 100, 30, TFT_BLACK);
+  tft.setFreeFont(LABEL0_FONT);
+  tft.setTextSize(1);
+  tft.setCursor(5, 15, 2);
+  tft.printf(time.c_str());
 }
 
 /********************************************************************
@@ -336,24 +364,24 @@ void intervalBlackOut() {
  * @return    None
  *********************************************************************/
 void readBME280() {
-  iRoom_temperature = (unit8_t*)(&bme.readTemperature());
+  iRoom_temperature = bme.readTemperature();
 
-  // Serial.print("Pressure = ");
-  // Serial.print(bme.readPressure() / 100.0F);
-  // Serial.println("hPa");
+  update_Room_temp();
 
-  // Serial.print("Approx. Altitude = ");
-  // Serial.print(bme.readAltitude(SEALEVELPRESSURE_HPA));
-  // Serial.println("m");
-
-  // Serial.print("Humidity = ");
-  // Serial.print(bme.readHumidity());
-  // Serial.println("%");
+  if (iRoom_temperature < iSet_temperature) {
+    digitalWrite(RELAY_PIN, LOW);// Relay connected
+  } else {
+    digitalWrite(RELAY_PIN, HIGH);// Relay disconnected 
+  }
 }
 
 void setup() {
   Serial.begin(115200);
   Serial.println("Az-Touch Mod 2.8 Display Thermostate");
+
+  // Relay pinout
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH); // Relay disconnected
 
   Serial.println(F("BME280 test"));
   I2CBME.begin(I2C_SDA, I2C_SCL, 100000);
@@ -367,17 +395,21 @@ void setup() {
   }
 
   initWiFi();
+  timeClient.begin();
   initTouchScreen();
 
   IntroScreen();
 
   readBME280();
 
+  interval0.interval(1000, updateTime);
   interval0.interval(10000, intervalBlackOut);
   interval0.interval(60000, readBME280);
+  
 }
 
 void loop() {
+  timeClient.update();
   interval0.handler();
   touchscreen();
 }

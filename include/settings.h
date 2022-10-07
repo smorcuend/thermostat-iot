@@ -29,7 +29,7 @@
 /*______End of Calibration______*/
 
 /*____Program specific constants_____*/
-#define MAX_TEMPERATURE 24  
+#define MAX_TEMPERATURE 30  
 #define MIN_TEMPERATURE 10
 
 #define LABEL0_FONT &FreeMono9pt7b // Key label font 1
